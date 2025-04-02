@@ -19,7 +19,7 @@
         }
         
         text {
-            font: 10px sans-serif;
+            font: 15px sans-serif;
             pointer-events: none;
         }
         
@@ -27,38 +27,70 @@
             margin: 0;
             overflow: hidden;
         }
+
+        #abbr-box {
+            position: fixed;
+            top: 50px;
+            right: 10px;
+            width: 200px;
+            max-height: 80vh;
+            overflow-y: auto;
+            background: white;
+            border: 1px solid #ccc;
+            padding: 10px;
+            font-size: 14px;
+        }
     </style>
 </head>
 
 <body>
     <h1>Force-Directed Graph with Zoom</h1>
+    <label for="degreeSlider">節點度數過濾 (5 ~ 100): </label>
+    <input id="degreeSlider" type="range" min="5" max="100" value="100" step="1">
+    <span id="degreeValue">100</span>
+    <label for="keywordSearch">搜尋關鍵字: </label>
+    <input id="keywordSearch" type="text">
+    <button id="searchButton">搜尋</button>
+    <div id="abbr-box">
+        <h2>縮寫對照表</h2>
+        <table id="abbr-table">
+            <thead>
+                <tr><th>縮寫</th><th>新關係</th></tr>
+            </thead>
+            <tbody></tbody>
+        </table>
+    </div>
     <script>
-        d3.csv("links_all.csv").then(function(data) {
-            // Map CSV data to links format
+        d3.csv("縮寫表.csv").then(function(data) {
+            var tableBody = d3.select("#abbr-table tbody");
+        
+            tableBody.selectAll("tr")
+                .data(data)
+                .enter()
+                .append("tr")
+                .html(d => `<td>${d.新關係}</td><td>${d.縮寫}</td>`);
+        }).catch(function(error) {
+            console.error("Error loading abbreviation table:", error);
+        });
+        d3.csv("links_all4.csv").then(function(data) {
             var links = data.map(function(row) {
                 return {
                     source: row["新實體1"],
                     target: row["新實體2"],
-                    type: row["關係"]
+                    type: row["縮寫"]
                 };
             });
 
-            // Calculate node degrees
+            // **去除重複的邊**
+            var uniqueLinks = Array.from(new Map(links.map(link => 
+                [`${link.source}-${link.target}`, link]
+            )).values());
+
             var nodeDegree = {};
             links.forEach(link => {
                 nodeDegree[link.source] = (nodeDegree[link.source] || 0) + 1;
                 nodeDegree[link.target] = (nodeDegree[link.target] || 0) + 1;
             });
-
-            // Filter nodes and links
-            var nodes = Object.entries(nodeDegree)
-                .filter(([id, degree]) => degree >= 2)
-                .map(([id, degree]) => ({
-                    id: id,
-                    degree: degree
-                }));
-
-            links = links.filter(link => nodeDegree[link.source] >= 10 && nodeDegree[link.target] >= 2);
 
             var width = window.innerWidth;
             var height = window.innerHeight;
@@ -67,77 +99,272 @@
                 .attr("width", width)
                 .attr("height", height);
 
-            // Add a group for zoom and pan
             var g = svg.append("g");
 
             var zoom = d3.zoom()
-                .scaleExtent([0.5, 5]) // Zoom scale
+                .scaleExtent([0.5, 5])
                 .on("zoom", (event) => g.attr("transform", event.transform));
 
             svg.call(zoom);
 
-            // Initialize force simulation
-            var simulation = d3.forceSimulation(nodes)
-                .force("link", d3.forceLink(links).id(d => d.id).distance(150))
-                .force("charge", d3.forceManyBody().strength(-300))
-                .force("center", d3.forceCenter(width / 2, height / 2));
+            var simulation, link, node, label;
+            
 
-            // Draw links
-            var link = g.append("g")
-                .attr("class", "links")
-                .selectAll("path")
-                .data(links)
-                .enter().append("path")
-                .attr("stroke-width", 2);
+            function updateGraph(degreeThreshold) {
+                // 停止舊的 simulation
+                if (simulation) {
+                    simulation.stop();
+                }
+            
+                // 清空圖表
+                g.html("");
+            
+                // 篩選節點
+                var nodes = Object.entries(nodeDegree)
+                    .filter(([id, degree]) => degree >= degreeThreshold)
+                    .map(([id, degree]) => ({ id: id, degree: degree }));
+            
+                var nodeMap = new Map(nodes.map(node => [node.id, node])); // 創建 ID 對應的節點映射
+            
+                var filteredLinks = links.filter(link =>
+                    nodeMap.has(link.source) && nodeMap.has(link.target) &&
+                    nodeDegree[link.source] >= 10 &&
+                    nodeDegree[link.target] >= 2
+                ).map(link => ({
+                    source: nodeMap.get(link.source), // 確保是物件
+                    target: nodeMap.get(link.target),
+                    type: link.type
+                }));
+            
+                // 建立新的力導向模擬
+                simulation = d3.forceSimulation(nodes)
+                    .force("link", d3.forceLink(filteredLinks).id(d => d.id).distance(150))
+                    .force("charge", d3.forceManyBody().strength(-300))
+                    .force("center", d3.forceCenter(width / 2, height / 2));
 
-            // Draw nodes with size adjustment
-            var node = g.append("g")
+                // 統計相同 source-target 的關係數量
+                let linkGroups = {};
+                filteredLinks.forEach(link => {
+                    let key = `${link.source.id}-${link.target.id}`;
+                    if (!linkGroups[key]) linkGroups[key] = [];
+                    linkGroups[key].push(link);
+                });
+
+                // 給每條邊加上 index 來確保標籤分開
+                filteredLinks.forEach(link => {
+                    let key = `${link.source.id}-${link.target.id}`;
+                    link.labelIndex = linkGroups[key].indexOf(link);
+                });
+            
+                // 繪製連結
+                link = g.append("g")
+                    .attr("class", "links")
+                    .selectAll("path")
+                    .data(filteredLinks)
+                    .enter().append("path")
+                    .attr("stroke-width", 2);
+                
+                // 繪製關係標籤
+                linkLabel = g.append("g")
+                    .attr("class", "link-labels")
+                    .selectAll("text")
+                    .data(filteredLinks)
+                    .enter().append("text")
+                    .attr("dy", d => -10 + d.labelIndex * 15)  // 讓標籤上下錯開
+                    .attr("text-anchor", "middle")
+                    .text(d => d.type);  // 顯示關係名稱
+            
+                // 繪製節點
+                node = g.append("g")
+                    .attr("class", "nodes")
+                    .selectAll("circle")
+                    .data(nodes)
+                    .enter().append("circle")
+                    .attr("r", d => Math.min(5 + 2 * d.degree, 30))
+                    .attr("fill", "#9dbebb") //節點顏色
+                    .call(d3.drag()
+                        .on("start", dragstarted)
+                        .on("drag", dragged)
+                        .on("end", dragended));
+            
+                // 繪製標籤
+                label = g.append("g")
+                    .selectAll("text")
+                    .data(nodes)
+                    .enter().append("text")
+                    .attr("dx", 0)
+                    .attr("text-anchor", "middle")  // 讓文字水平置中
+                    .attr("dy", ".35em")
+                    .text(d => d.id);
+            
+                simulation.nodes(nodes).on("tick", ticked);
+                simulation.force("link").links(filteredLinks);
+            }
+
+            // 搜尋功能
+            d3.select("#searchButton").on("click", function() {
+                var keyword = d3.select("#keywordSearch").property("value").trim();
+            
+                if (keyword === "") {
+                    updateGraph(+d3.select("#degreeSlider").property("value"));
+                    return;
+                }
+            
+                var matchedNodes = Object.entries(nodeDegree)
+                    .filter(([id, degree]) => id.includes(keyword))
+                    .map(([id, degree]) => ({ id: id, degree: degree }));
+            
+                var matchedNodeSet = new Set(matchedNodes.map(node => node.id));
+                var firstLayerNodes = new Set();
+                var secondLayerNodes = new Set();
+            
+                var relatedLinks = links.filter(link =>
+                    matchedNodeSet.has(link.source) || matchedNodeSet.has(link.target)
+                );
+            
+                var relatedNodes = new Set();
+                relatedLinks.forEach(link => {
+                    relatedNodes.add(link.source);
+                    relatedNodes.add(link.target);
+                    firstLayerNodes.add(link.source);
+                    firstLayerNodes.add(link.target);
+                });
+            
+                var extendedLinks = [];
+                relatedLinks.forEach(link => {
+                    links.forEach(l => {
+                        if ((l.source === link.target || l.target === link.source) && 
+                            !matchedNodeSet.has(l.source) && !firstLayerNodes.has(l.source)) {
+                            extendedLinks.push(l);
+                            secondLayerNodes.add(l.source);
+                        }
+                        if ((l.target === link.source || l.source === link.target) && 
+                            !matchedNodeSet.has(l.target) && !firstLayerNodes.has(l.target)) {
+                            extendedLinks.push(l);
+                            secondLayerNodes.add(l.target);
+                        }
+                    });
+                });
+            
+                var finalNodes = Array.from(new Set([...relatedNodes, ...secondLayerNodes])).map(id => ({
+                    id: id,
+                    degree: nodeDegree[id] || 0
+                }));
+            
+                updateGraphWithNodesAndLinks(finalNodes, relatedLinks.concat(extendedLinks), matchedNodeSet, firstLayerNodes, secondLayerNodes);
+            });
+
+            // 用於更新圖表的函式 (修改部分)
+            function updateGraphWithNodesAndLinks(filteredNodes, filteredLinks, matchedNodeSet, firstLayerNodes, secondLayerNodes) {
+                if (simulation) {
+                    simulation.stop();
+                }
+
+                g.html(""); // 清空圖表
+
+                simulation = d3.forceSimulation(filteredNodes)
+                    .force("link", d3.forceLink(filteredLinks).id(d => d.id).distance(150))
+                    .force("charge", d3.forceManyBody().strength(-300))
+                    .force("center", d3.forceCenter(width / 2, height / 2))
+
+                // 統計相同 source-target 的關係數量
+                let linkGroups = {};
+                filteredLinks.forEach(link => {
+                    let key = `${link.source.id}-${link.target.id}`;
+                    if (!linkGroups[key]) linkGroups[key] = [];
+                    linkGroups[key].push(link);
+                });
+
+                // 給每條邊加上 index 來確保標籤分開
+                filteredLinks.forEach(link => {
+                    let key = `${link.source.id}-${link.target.id}`;
+                    link.labelIndex = linkGroups[key].indexOf(link);
+                });
+
+                link = g.append("g")
+                    .attr("class", "links")
+                    .selectAll("path")
+                    .data(filteredLinks)
+                    .enter().append("path")
+                    .attr("stroke-width", 2);
+
+                // 繪製關係標籤
+                linkLabel = g.append("g")
+                    .attr("class", "link-labels")
+                    .selectAll("text")
+                    .data(filteredLinks)
+                    .enter().append("text")
+                    .attr("dy", d => {
+                        // 根據邊的方向來調整上下偏移
+                        let dy = -10 + d.labelIndex * 15;
+                        if (d.source.x > d.target.x) {
+                            dy = dy + 10;  // 根據需要調整
+                        }
+                        return dy;
+                    })
+                    .attr("dx", d => {
+                        // 根據邊的方向來調整左右偏移
+                        let dx = 0;
+                        if (d.source.x > d.target.x) {
+                            dx = -20;  // 根據需要調整
+                        } else {
+                            dx = 20;  // 根據需要調整
+                        }
+                        return dx;
+                    })
+                    .attr("text-anchor", "middle")
+                    .text(d => d.type);  // 顯示關係名稱
+
+                // 修改節點繪製，依據是否符合關鍵字改變顏色
+                node = g.append("g")
                 .attr("class", "nodes")
                 .selectAll("circle")
-                .data(nodes)
+                .data(filteredNodes)
                 .enter().append("circle")
-                .attr("r", d => Math.min(5 + 2 * d.degree, 30)) // Node size between 10 and 30
-                .attr("fill", "blue")
-                .call(d3.drag()
-                    .on("start", dragstarted)
-                    .on("drag", dragged)
-                    .on("end", dragended));
+                .attr("r", d => Math.min(5 + 2 * d.degree, 30))
+                .attr("fill", d => {
+                    if (matchedNodeSet.has(d.id)) {
+                        return "#edafb8"; // **關鍵字節點**
+                    } else if (firstLayerNodes.has(d.id)) {
+                        return "#dedbd2"; // **第一層節點**
+                    } else if (secondLayerNodes.has(d.id)) {
+                        return "#9dbebb"; // **第二層節點**
+                    } else {
+                        return "#ccc"; // **預設顏色**
+                    }
+                });
 
-            // Add labels
-            var label = g.append("g")
-                .selectAll("text")
-                .data(nodes)
-                .enter().append("text")
-                .attr("dx", 10)
-                .attr("dy", ".35em")
-                .text(d => d.id);
+                label = g.append("g")
+                    .selectAll("text")
+                    .data(filteredNodes)
+                    .enter().append("text")
+                    .attr("dx", 0)
+                    .attr("text-anchor", "middle")  // 讓文字水平置中
+                    .attr("dy", ".35em")
+                    .text(d => d.id);
 
-            simulation
-                .nodes(nodes)
-                .on("tick", ticked);
+                simulation.nodes(filteredNodes).on("tick", ticked);
+                simulation.force("link").links(filteredLinks);
+            }
 
-            simulation.force("link")
-                .links(links);
-
-            // Update positions on each tick
+            // 更新位置
             function ticked() {
                 link.attr("d", d => {
                     var dx = d.target.x - d.source.x,
                         dy = d.target.y - d.source.y,
-                        dr = Math.sqrt(dx * dx + dy * dy); // Curve radius
+                        dr = Math.sqrt(dx * dx + dy * dy);
                     return `M${d.source.x},${d.source.y}A${dr},${dr} 0 0,1 ${d.target.x},${d.target.y}`;
                 });
 
-                node
-                    .attr("cx", d => d.x)
-                    .attr("cy", d => d.y);
+                linkLabel.attr("x", d => (d.source.x + d.target.x) / 2)
+                         .attr("y", d => (d.source.y + d.target.y) / 2);
 
-                label
-                    .attr("x", d => d.x)
-                    .attr("y", d => d.y);
+                node.attr("cx", d => d.x).attr("cy", d => d.y);
+
+                label.attr("x", d => d.x).attr("y", d => d.y);
             }
 
-            // Drag event handlers
+            // 拖曳事件處理
             function dragstarted(event, d) {
                 if (!event.active) simulation.alphaTarget(0.3).restart();
                 d.fx = d.x;
@@ -154,6 +381,16 @@
                 d.fx = null;
                 d.fy = null;
             }
+
+            // 初始化圖表
+            updateGraph(100);
+
+            // 滑桿事件監聽
+            d3.select("#degreeSlider").on("input", function() {
+                var degreeThreshold = +this.value;
+                d3.select("#degreeValue").text(degreeThreshold);
+                updateGraph(degreeThreshold);
+            });
         }).catch(function(error) {
             console.error("Error loading or parsing CSV file:", error);
         });
